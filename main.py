@@ -2,7 +2,7 @@ import ccxt
 import time
 import winsound  # 仅适用于 Windows
 import traceback
-import os
+import threading
 from datetime import datetime
 
 # 设置参数
@@ -86,16 +86,23 @@ def check_condition_2(candles_15m):
     else:
         return False
 
-def play_alert_sound():
+def play_alert_sound(duration=300):
     # 播放提示音 (Windows)
-    frequency = 2500  # 赫兹
-    duration = 1000  # 毫秒
-    winsound.Beep(frequency, duration)
+    sound_file = 'alert.wav'  # 替换为你的MP3文件名
+    try:
+        # 异步循环播放声音
+        winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_LOOP | winsound.SND_ASYNC)
+        time.sleep(duration)  # 播放指定时长
+        winsound.PlaySound(None, winsound.SND_PURGE)  # 停止播放
+    except Exception as e:
+        print(f"播放声音文件时发生错误: {e}")
+        traceback.print_exc()  # 打印错误堆栈信息
 
 # 主循环
 condition_1_satisfied = False
 while True:
     try:
+        threading.Thread(target=play_alert_sound).start()
         # 获取K线数据
         candles_15m = exchange.fetch_ohlcv(symbol, timeframe_15m, limit=60)
         print(f"15m K线数据:")
@@ -120,7 +127,7 @@ while True:
         # 检查前提条件 2
         if condition_1_satisfied and check_condition_2(candles_15m):
             print("前提条件 2 已满足！")
-            play_alert_sound()
+            threading.Thread(target=play_alert_sound).start()
 
         # 等待一段时间
         time.sleep(60)  # 每分钟检查一次
