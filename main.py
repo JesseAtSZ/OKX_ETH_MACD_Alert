@@ -20,7 +20,7 @@ signal_period = 5
 ema_period_20 = 20
 ema_period_60 = 60
 db_path = 'candles_history.db'
-alert_stop_at = datetime.now()  # 停止时间为当前时间加一天
+alert_trigger_at = 0   # 初始化告警触发时间
 alert_period = 5 * 60  # 5分钟
 
 # 初始化交易所
@@ -28,7 +28,7 @@ alert_period = 5 * 60  # 5分钟
 # secretkey = "46FB391FE553BB5F67397F53CC6DFF7D"
 
 # 设置日志打印级别，便于调试
-# 设置日志级别（DEBUG会显示所有信息 INFO  常规信息 WARNING 警告 ERROR 错误 CRITICAL 致命错误 ）
+# 设置日志级别（DEBUG 会显示所有信息 INFO  常规信息 WARNING 警告 ERROR 错误 CRITICAL 致命错误 ）
 # 控制台处理器（显示 DEBUG 以上）
 logger = logging.getLogger('main_logger')
 console_handler = logging.StreamHandler()
@@ -169,7 +169,7 @@ def save_to_sqlite(candles, symbol, time_frame):
         if max_time_1 < max_time_2:  # 有增量数据，触发评估动作
             cursor.close()
             return True
-        else:  # 无增量数据，do nothing
+        else:  # 无增量数据，do nothing  。  修改，无增量数据也需要 进行评估，原因是最新K线必定发生变化，可能影响指标计算。
             cursor.close()
             return None
     except Exception as e:
@@ -190,49 +190,56 @@ def load_from_sqlite(symbol, time_frame):
             FROM ''' + symbol.replace('/', '_') + '_' + time_frame + ''' 
             ORDER BY ts desc limit 400
         ''', conn)
+        max_ts = df['timestamp'].max()
     except sqlite3.Error as e:
         print(f"Database connection error: {e}")
         return False
     conn.close()
     # 确保时间序列按日期升序排列
-    return df.sort_values('timestamp')
+    return df.sort_values('timestamp'),max_ts
 
 
 # 需求： 出现macd两个及其以上红色空心柱子。
 def recently_macd_red_get_shorter_range(macd_height_serize):
     if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
+        logger.debug(f"MACD红色空心柱子高度序列长度小于2，序列：{macd_height_serize.iloc[:].tolist()}")
         return 0
     if macd_height_serize.iloc[-1] >= 0:  # <0 才能出现红色柱子
+        logger.debug(f"MACD红色空心柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} >= 0，序列最新部分：{macd_height_serize.iloc[ -2:].tolist()}")
         return 0
     else:
         if macd_height_serize.iloc[-1] < macd_height_serize.iloc[-2]:  # 递增才能出现空心柱子，递减跳出返回0
+            logger.debug(f"MACD红色空心柱子高度序列最后两根柱子高度{macd_height_serize.iloc[-1]} < {macd_height_serize.iloc[-2]}")
             return 0
         else:
             for i in range(1, len(macd_height_serize), 1):
                 if macd_height_serize.iloc[-i] > macd_height_serize.iloc[-i - 1]:
                     pass
                 else:  # 返回红色空心柱子的根数
-                    logger.debug(f"MACD红色空心柱子高度{macd_height_serize.iloc[-i + 1:].tolist()} 根数：{i - 1}")
+                    logger.debug(f"MACD红色空心柱子高度序列的最小父序列 {macd_height_serize.iloc[-i:].tolist()} 根数：{i - 1}")
                     return i - 1
             logger.debug(
-                f"从第二根开始都是红色空心的{macd_height_serize.iloc[:].tolist()} 根数：{len(macd_height_serize)}")
-            return len(macd_height_serize)
+                f"从第二根开始都是红色空心的{macd_height_serize.iloc[:].tolist()} 根数：{len(macd_height_serize)-1}")
+            return len(macd_height_serize)-1
 
 
 # 需求：两个及以上绿色柱子（全实心或者全空心或者一实心一空心）
 def recently_macd_green_range(macd_height_serize):
     if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
+        logger.debug(f"MACD绿色柱子高度序列长度小于2，序列：{macd_height_serize.iloc[:].tolist()}")
         return 1 if macd_height_serize.iloc[-1] > 0 else 0
     if macd_height_serize.iloc[-1] < 0:  # <0 是红色柱子，不符合需求
+        logger.debug(f"MACD柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} < 0，序列最新部分：{macd_height_serize.iloc[-2:].tolist()}")
         return 0
     elif macd_height_serize.iloc[-1] > 0 > macd_height_serize.iloc[-2]:  # >0 是绿色柱子
+        logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-1]}，前一根红色柱子高度{macd_height_serize.iloc[-2]}")
         return 1
     else:
         for i in range(1, len(macd_height_serize) + 1, 1):
             if macd_height_serize.iloc[-i] > 0:
                 pass
             else:  # 返回绿色柱子的根数
-                logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-i + 1:].tolist()} 根数：{i - 1}")
+                logger.debug(f"MACD绿色柱子高度序列的最小父序列{macd_height_serize.iloc[-i:].tolist()} 根数：{i - 1}")
                 return i - 1
         logger.debug(f"所有柱子都是绿的{macd_height_serize.iloc[:].tolist()} 根数：{len(macd_height_serize)}")
         return len(macd_height_serize)
@@ -241,24 +248,29 @@ def recently_macd_green_range(macd_height_serize):
 # 需求：一红一绿（无所谓空心实心）-- 实现为先红后绿
 def recently_macd_green_and_elder_red(macd_height_serize):
     if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
+        logger.debug(f"MACD红色和绿色柱子高度序列长度小于2，序列：{macd_height_serize.iloc[:].tolist()}")
         return False
     if macd_height_serize.iloc[-1] > 0 > macd_height_serize.iloc[-2]:  # >0 是绿色柱子
         logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-1]}，前一根红色柱子高度{macd_height_serize.iloc[-2]}")
         return True
     else:
+        logger.debug(f"MACD高度序列最后两根柱子高度{macd_height_serize.iloc[-2]} {macd_height_serize.iloc[-1]}")
         return False
 
 
 # 需求：macd出现了第一根红色实心柱子。且这根柱子对应的k线要阴线收盘。
 def recently_macd_red_with_candles_red(macd_height_serize, prices_open_serize, prices_close_serize):
     if len(macd_height_serize) < 2 or len(prices_open_serize) < 1 or len(prices_close_serize) < 1:
+        logger.debug(f"输入数据异常：macd序列，开盘价格序列，收盘价格序列 {macd_height_serize.iloc[:].tolist()} {prices_open_serize.iloc[:].tolist()} {prices_close_serize.iloc[:].tolist()} ")
         return False  # 数据不足，无法比较
-    if (macd_height_serize.iloc[-1] < 0 and macd_height_serize.iloc[-1] < prices_open_serize.iloc[-2]) and \
-            prices_open_serize.iloc[-1] > prices_close_serize.iloc[-1]:  # <0 是红色实心柱子
+    if (macd_height_serize.iloc[-1] < 0 and macd_height_serize.iloc[-1] < macd_height_serize.iloc[-2]) and \
+            prices_open_serize.iloc[-1] > prices_close_serize.iloc[-1]:  # <0 并降序是红色实心柱子
         logger.debug(
-            f"MACD红色实心柱子高度{macd_height_serize.iloc[-1]}，对应K线开盘价{prices_open_serize.iloc[-1]}，收盘价{prices_close_serize.iloc[-1]}")
+            f"MACD序列部分最新数据： {macd_height_serize.iloc[-2:]} ，对应K线开盘价{prices_open_serize.iloc[-1]}，收盘价{prices_close_serize.iloc[-1]}")
         return True
     else:
+        logger.debug(
+            f"MACD序列部分最新数据： {macd_height_serize.iloc[-2:]} ，对应K线开盘价{prices_open_serize.iloc[-1]}，收盘价{prices_close_serize.iloc[-1]}")
         return False
 
 
@@ -269,11 +281,12 @@ def chk_current_ema60_greater_than_ema20(ema60, ema20):
         logger.debug(f"当前EMA60({ema60})大于EMA20({ema20})")
         return True
     else:
+        logger.debug(f"当前EMA60({ema60})不大于EMA20({ema20})")
         return False
 
 
 def transfrom_data_and_eval(symbol, time_frame):
-    df = load_from_sqlite(symbol, time_frame)
+    df,max_ts = load_from_sqlite(symbol, time_frame)
     df = df.sort_values('timestamp', ascending=True)  # 确保时间序列按日期升序排列
 
     # 转换数据类型
@@ -293,28 +306,27 @@ def transfrom_data_and_eval(symbol, time_frame):
     # 排除NaN
     df = df.dropna()
 
-    # 检查条件
-    current_ema60_greater_than_ema20 = df['EMA_60'].iloc[-1] > df['EMA_20'].iloc[-1]
 
     # 不再必要的调试语句
     # logger.debug(f"最近25条K线收盘价格： {prices['close'][-25:].tolist()}")
     # logger.debug(f"最新5根： EMA_60： {df['EMA_60'].iloc[-5:].tolist()} EMA_20：{df['EMA_20'].iloc[-5:].tolist()}")
     # logger.debug(f"最新一条K线的信息： {prices['open'][-1]}  {prices['high'][-1]}  {prices['low'][-1]}  {prices['close'][-1]}")
     logger.debug(
-        f"最新数据的上一条（用于验证与网页数据是否一致）： EMA_60： {df['EMA_60'].iloc[-2].tolist()} EMA_20：{df['EMA_20'].iloc[-2].tolist()}")
+        f"最新数据的上两条（用于验证与网页数据是否一致）： EMA_60： {df['EMA_60'].iloc[-3].tolist()} EMA_20：{df['EMA_20'].iloc[-2].tolist()}")
     logger.debug(
-        f"最新数据的上一条（用于验证与网页数据是否一致）： MACD： {df['MACD'].iloc[-2].tolist()}  {df['MACD_signal'].iloc[-2].tolist()}  {df['MACD_hist'].iloc[-2].tolist()}")
+        f"最新数据的上两条（用于验证与网页数据是否一致）： MACD： {df['MACD'].iloc[-3].tolist()}  {df['MACD_signal'].iloc[-2].tolist()}  {df['MACD_hist'].iloc[-2].tolist()}")
 
     #  前提1、EMA20日线在60日均线下。出现macd两个及其以上红色空心柱子或者两个及以上绿色柱子（全实心或者全空心或者一实心一空心）或者一红一绿（无所谓空心实心）
     if chk_current_ema60_greater_than_ema20(df['EMA_60'].iloc[-1], df['EMA_20'].iloc[-1]) and (
             recently_macd_red_get_shorter_range(df['MACD_hist']) >= 2 or
             recently_macd_green_range(df['MACD_hist']) >= 2 or
             recently_macd_green_and_elder_red(df['MACD_hist'])
-    ):
-        logger.info(f"{symbol} {time_frame} 前提1满足条件，EMA20在EMA60下，MACD满足红色或绿色柱子条件。")
-        yield (1, '前提1满足条件')
+    ) and recently_macd_red_with_candles_red:
+        logger.warning(f"{symbol} {time_frame} 前提1~3均满足，触发告警准备。")
+        return True,max_ts
+    else:
+        return False,max_ts
 
-    #  前提2、MACD出现了第一根红色实心柱子。且这根柱子对应的k线要阴线收盘。
 
 
 # 主循环
@@ -345,14 +357,20 @@ while True:
             ss = save_to_sqlite(candles, symbol, i)
             if ss in (True, None):  # 测试 None True  ss == True
                 # 进行业务处理
-                for which_rule_satisfied, msg_str in transfrom_data_and_eval(symbol, i):
-                    print(f"{symbol} {i} 满足规则，规则号{which_rule_satisfied}：{msg_str}")
-                    # do something else , alert, send message, etc.
-
-            elif ss == None:  # 测试 None True  todo 这里逻辑需要改写。
-                logger.info(f"{symbol} {i} K线数据无增量，跳过后续处理。")
+                logger.info(f"{symbol} {i} K线数据保存成功，开始评估数据。")
+                eval_result,eva_time = transfrom_data_and_eval(symbol, i)
+                if eval_result and eva_time > alert_trigger_at:  # 评估结果满足条件，且距离上次告警时间超过5分钟
+                    logger.warning(f"{symbol} {i} 条件满足，触发告警。")
+                elif eval_result and eva_time <= alert_trigger_at:  # 评估结果满足条件，但此时已经触发过告警
+                    logger.info(f"{symbol} {i} 条件满足，但当前已经触发过，跳过告警。")
+                elif not eval_result:
+                    logger.debug(f"{symbol} {i} 条件不满足，跳过告警。")
+                else:
+                    logger.error(f"{symbol} {i} 出现逻辑之外的异常，需排查代码，跳过后续处理。")
+            elif ss == False:  # 数据库操作失败
+                logger.info(f"{symbol} {i} 产生异常，跳过后续处理。")
             else:
-                logger.error(f"{symbol} {i} K线数据保存失败，跳过后续处理。")
+                logger.error(f"{symbol} {i} 出现逻辑之外的异常，需排查代码，跳过后续处理。")
 
         # 检查前提条件 1
         # if not condition_1_satisfied:
