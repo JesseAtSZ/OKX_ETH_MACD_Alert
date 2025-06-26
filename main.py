@@ -1,16 +1,26 @@
-import ccxt
+import tkinter as tk
+from tkinter import ttk
+import threading
 import time
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import ccxt
 import winsound  # 仅适用于 Windows
 import traceback
-import os
-from datetime import datetime
-# 增加数据评估相关库
+from datetime import datetime, timedelta
 import sqlite3
 import pandas as pd
 import talib
 import logging
+from matplotlib.gridspec import GridSpec
+import mplfinance as mpf
 
-# 设置参数
+# 全局变量及参数设置
+running = False
+thread = None
+alert_thread = None
+stop_event = threading.Event()  # 用于控制线程停止
+alert_stop_event = threading.Event()  # 用于控制告警线程停止
 symbol = 'ETH/USDT'
 timeframe_15m = '15m'
 timeframe_30m = '30m'
@@ -20,12 +30,8 @@ signal_period = 5
 ema_period_20 = 20
 ema_period_60 = 60
 db_path = 'candles_history.db'
-alert_trigger_at = 0   # 初始化告警触发时间
+alert_trigger_at = 0  # 初始化告警触发时间
 alert_period = 5 * 60  # 5分钟
-
-# 初始化交易所
-# apikey = "53f63eda-25f8-4822-9d6c-5765fc85174d"
-# secretkey = "46FB391FE553BB5F67397F53CC6DFF7D"
 
 # 设置日志打印级别，便于调试
 # 设置日志级别（DEBUG 会显示所有信息 INFO  常规信息 WARNING 警告 ERROR 错误 CRITICAL 致命错误 ）
@@ -41,16 +47,14 @@ logger.setLevel(logging.DEBUG)
 
 # 手动设置代理
 proxies = {
-    'http': 'http://127.0.0.1:7890',  # 替换为你的 HTTP 代理地址和端口
-    'https': 'http://127.0.0.1:7890'  # 替换为你的 HTTPS 代理地址和端口
+    'http': 'http://127.0.0.1:7897',
+    'https': 'http://127.0.0.1:7897'
 }
 
 # 打印代理信息
 print(f"手动设置的代理: {proxies}")
 
 exchange = ccxt.okx({
-    #    'apiKey': apikey,
-    #    'secret': secretkey,
     'proxies': proxies,
 })
 
@@ -111,11 +115,19 @@ def check_condition_2(candles_15m):
         return False
 
 
-def play_alert_sound():
-    # 播放提示音 (Windows)
-    frequency = 2500  # 赫兹
-    duration = 1000  # 毫秒
-    winsound.Beep(frequency, duration)
+def alert_sound_loop():
+    global alert_stop_event
+    sound_file = 'alert.wav'
+    try:
+        winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_LOOP | winsound.SND_ASYNC)
+        pause_button.config(state=tk.NORMAL)
+        while not alert_stop_event.is_set():
+            time.sleep(0.1)  # 检查停止事件
+        winsound.PlaySound(None, winsound.SND_PURGE)  # 停止播放
+        root.after(0, pause_button.config, {"state": tk.DISABLED})  # 禁用按钮
+    except Exception as e:
+        print(f"播放声音文件时发生错误: {e}")
+        traceback.print_exc()
 
 
 def get_max_time(db_path, symbol, time_frame):
@@ -178,7 +190,7 @@ def save_to_sqlite(candles, symbol, time_frame):
         return False
 
 
-def load_from_sqlite(symbol, time_frame):
+def load_from_sqlite(symbol, time_frame, limit=400):
     # 连接到 SQLite 数据库
     try:
         conn = sqlite3.connect(db_path)
@@ -188,15 +200,16 @@ def load_from_sqlite(symbol, time_frame):
             SELECT 
                 ts AS timestamp,open_price as open,high_price as high, low_price as low, close_price as close, volume
             FROM ''' + symbol.replace('/', '_') + '_' + time_frame + ''' 
-            ORDER BY ts desc limit 400
-        ''', conn)
+            ORDER BY ts desc limit ''' + str(limit), conn)
         max_ts = df['timestamp'].max()
     except sqlite3.Error as e:
         print(f"Database connection error: {e}")
         return False
     conn.close()
-    # 确保时间序列按日期升序排列
-    return df.sort_values('timestamp'),max_ts
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df = df.sort_values('timestamp')
+    df = df.set_index('timestamp')
+    return df, max_ts
 
 
 # 需求： 出现macd两个及其以上红色空心柱子。
@@ -305,12 +318,6 @@ def transfrom_data_and_eval(symbol, time_frame):
 
     # 排除NaN
     df = df.dropna()
-
-
-    # 不再必要的调试语句
-    # logger.debug(f"最近25条K线收盘价格： {prices['close'][-25:].tolist()}")
-    # logger.debug(f"最新5根： EMA_60： {df['EMA_60'].iloc[-5:].tolist()} EMA_20：{df['EMA_20'].iloc[-5:].tolist()}")
-    # logger.debug(f"最新一条K线的信息： {prices['open'][-1]}  {prices['high'][-1]}  {prices['low'][-1]}  {prices['close'][-1]}")
     logger.debug(
         f"最新数据的上两条（用于验证与网页数据是否一致）： EMA_60： {df['EMA_60'].iloc[-3].tolist()} EMA_20：{df['EMA_20'].iloc[-2].tolist()}")
     logger.debug(
@@ -323,70 +330,154 @@ def transfrom_data_and_eval(symbol, time_frame):
             recently_macd_green_and_elder_red(df['MACD_hist'])
     ) and recently_macd_red_with_candles_red:
         logger.warning(f"{symbol} {time_frame} 前提1~3均满足，触发告警准备。")
-        return True,max_ts
+        return True, max_ts
     else:
-        return False,max_ts
+        return False, max_ts
 
 
-
-# 主循环
-condition_1_satisfied = False
-while True:
-    try:
-        # 获取K线数据
-        # candles_15m = exchange.fetch_ohlcv(symbol, timeframe_15m, limit=60)
-
-        # print(f"15m K线数据:")
-        # for candle in candles_15m:  # 输出太多了，看不过来，存到数据库里，并仅显示数据变化范围。
-        #    timestamp, open_price, high_price, low_price, close_price, volume = candle
-        #    print (type(candle))
-        #    readable_time = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        #    print(f"  时间: {readable_time}, 开盘价: {open_price}, 最高价: {high_price}, 最低价: {low_price}, 收盘价: {close_price}, 交易量: {volume}")
-
-        # candles_30m = exchange.fetch_ohlcv(symbol, timeframe_30m, limit=60)
-        # print(f"30m K线数据:")
-        # for candle in candles_30m:
-        #    timestamp, open_price, high_price, low_price, close_price, volume = candle
-        #    readable_time = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')
-        #    print(f"  时间: {readable_time}, 开盘价: {open_price}, 最高价: {high_price}, 最低价: {low_price}, 收盘价: {close_price}, 交易量: {volume}")
-
-        # 重构下上面的代码
-        for i in (timeframe_15m, timeframe_30m):
-            candles = exchange.fetch_ohlcv(symbol, i, limit=1440)
-            logger.info(f"保存 {symbol} {i} K线数据:")
-            ss = save_to_sqlite(candles, symbol, i)
-            if ss in (True, None):  # 测试 None True  ss == True
-                # 进行业务处理
-                logger.info(f"{symbol} {i} K线数据保存成功，开始评估数据。")
-                eval_result,eva_time = transfrom_data_and_eval(symbol, i)
-                if eval_result and eva_time > alert_trigger_at:  # 评估结果满足条件，且距离上次告警时间超过5分钟
-                    logger.warning(f"{symbol} {i} 条件满足，触发告警。")
-                elif eval_result and eva_time <= alert_trigger_at:  # 评估结果满足条件，但此时已经触发过告警
-                    logger.info(f"{symbol} {i} 条件满足，但当前已经触发过，跳过告警。")
-                elif not eval_result:
-                    logger.debug(f"{symbol} {i} 条件不满足，跳过告警。")
+def main_loop():
+    global running, alert_trigger_at, alert_thread
+    if running and not stop_event.is_set():
+        try:
+            for i in (timeframe_15m, timeframe_30m):
+                candles = exchange.fetch_ohlcv(symbol, i, limit=1440)
+                logger.info(f"保存 {symbol} {i} K线数据:")
+                ss = save_to_sqlite(candles, symbol, i)
+                if ss in (True, None):
+                    logger.info(f"{symbol} {i} K线数据保存成功，开始评估数据。")
+                    eval_result, eva_time = transfrom_data_and_eval(symbol, i)
+                    if eval_result and eva_time > alert_trigger_at:
+                        logger.warning(f"{symbol} {i} 条件满足，触发告警。")
+                        alert_trigger_at = eva_time
+                        alert_stop_event.clear()
+                        alert_thread = threading.Thread(target=alert_sound_loop)
+                        alert_thread.start()
+                    elif eval_result and eva_time <= alert_trigger_at:
+                        logger.info(f"{symbol} {i} 条件满足，但当前已经触发过，跳过告警。")
+                    elif not eval_result:
+                        logger.debug(f"{symbol} {i} 条件不满足，跳过告警。")
+                    else:
+                        logger.error(f"{symbol} {i} 出现逻辑之外的异常，需排查代码，跳过后续处理。")
+                elif ss == False:
+                    logger.info(f"{symbol} {i} 产生异常，跳过后续处理。")
                 else:
                     logger.error(f"{symbol} {i} 出现逻辑之外的异常，需排查代码，跳过后续处理。")
-            elif ss == False:  # 数据库操作失败
-                logger.info(f"{symbol} {i} 产生异常，跳过后续处理。")
-            else:
-                logger.error(f"{symbol} {i} 出现逻辑之外的异常，需排查代码，跳过后续处理。")
 
-        # 检查前提条件 1
-        # if not condition_1_satisfied:
-        #    condition_1_satisfied = check_condition_1(candles_30m)
-        #    if condition_1_satisfied:
-        #        print("前提条件 1 已满足")
+            update_plot()  # 更新图表
 
-        # 检查前提条件 2
-        # if condition_1_satisfied and check_condition_2(candles_15m):
-        #    print("前提条件 2 已满足！")
-        #    play_alert_sound()
+        except Exception as e:
+            print(f"发生错误: {type(e).__name__}: {e}")
+            traceback.print_exc()
 
-        # 等待一段时间
-        time.sleep(60)  # 每分钟检查一次
+        # main_loop 不再使用 time.sleep 阻塞主线程，而是通过 root.after 每 60 秒触发一次数据查询和评估。
+        # 点击停止程序时，可以立即停止 main_loop 的循环调用，从而避免界面卡死。
+        root.after(60000, main_loop)  # 60秒后再次调用 main_loop
+
+def start_stop_program():
+    global running, thread
+    if running:
+        # 如果程序正在运行，则停止程序
+        running = False
+        stop_event.set()  # 设置停止事件
+        pause_alert()
+        status_label.config(text="程序已停止")
+        start_stop_button.config(text="启动程序")  # 更改按钮文本
+
+    else:
+        # 如果程序未运行，则启动程序
+        running = True
+        stop_event.clear()  # 清除停止事件
+        thread = threading.Thread(target=main_loop)
+        thread.start()
+        status_label.config(text="程序运行中...")
+        start_stop_button.config(text="停止程序")  # 更改按钮文本
+
+
+def pause_alert():
+    global alert_thread, alert_stop_event
+    if alert_thread and alert_thread.is_alive():
+        alert_stop_event.set()  # 设置告警停止事件
+        pause_button.config(state=tk.DISABLED)
+        logger.info("告警已暂停。")
+    else:
+        logger.info("没有正在运行的告警线程，无法暂停。")
+
+
+def update_plot():
+    try:
+        # 获取最近4小时的数据 (假设 timeframe_15m 是 15 分钟)
+        df, _ = load_from_sqlite(symbol, timeframe_15m, limit=4 * 16)  # 4 小时 = 16 个 15 分钟周期
+        if df is False:
+            logger.error("无法从数据库加载数据，跳过图表更新。")
+            return
+
+        # 确保数据按时间戳排序
+        df = df.sort_index()
+
+        # 转换数据类型
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col], errors='coerce')  # 将无法转换为数字的值替换为 NaN
+        df = df.dropna()  # 删除包含 NaN 的行
+
+        # 确保时间戳是datetime类型, 并转换为北京时间
+        if df.index.dtype == 'int64':
+            df.index = pd.to_datetime(df.index, unit='ms').tz_localize('UTC').tz_convert('Asia/Shanghai')
+        else:
+            df.index = df.index.tz_localize('UTC').tz_convert('Asia/Shanghai')
+
+        # 获取当前时间
+        now = pd.Timestamp.now(tz='Asia/Shanghai')
+
+        # 设定要显示的时间范围（例如，最近4小时）
+        four_hours_ago = now - pd.Timedelta(hours=4)
+
+        # 筛选时间范围内的数据
+        df = df[df.index >= four_hours_ago]
+
+        # 定义 K 线颜色
+        mc = mpf.make_marketcolors(up='green', down='red', inherit=True)
+        s = mpf.make_mpf_style(marketcolors=mc)
+
+        # 清空之前的图表
+        ax.clear()
+
+        # 绘制 K 线图
+        mpf.plot(df, type='candle', ax=ax, volume=False, style=s)
+
+        # 自动调整 x 轴刻度以适应数据
+        ax.tick_params(axis='x', rotation=45)
+        fig.canvas.draw()
+
+        # 将 Matplotlib 图表嵌入到 Tkinter 窗口
+        canvas.figure = fig
+        canvas.draw()
 
     except Exception as e:
-        print(f"发生错误: {type(e).__name__}: {e}")
+        print(f"更新图表时发生错误: {type(e).__name__}: {e}")
         traceback.print_exc()
-        time.sleep(60)
+
+
+# 创建主窗口
+root = tk.Tk()
+root.title("交易监控程序")
+
+# 创建按钮
+start_stop_button = ttk.Button(root, text="启动程序", command=start_stop_program)
+pause_button = ttk.Button(root, text="暂停本次告警", command=pause_alert, state=tk.DISABLED)  # 初始状态禁用
+
+# 状态标签
+status_label = tk.Label(root, text="程序未运行")
+
+# 创建图表
+fig, ax = plt.subplots(figsize=(10, 4))
+canvas = FigureCanvasTkAgg(fig, master=root)
+canvas_widget = canvas.get_tk_widget()
+
+# 布局
+start_stop_button.pack(pady=5)
+pause_button.pack(pady=5)
+status_label.pack(pady=5)
+canvas_widget.pack(pady=10)
+
+# 启动主循环
+root.mainloop()
