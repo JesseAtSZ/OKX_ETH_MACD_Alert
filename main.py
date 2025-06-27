@@ -215,14 +215,14 @@ def load_from_sqlite(symbol, time_frame, limit=400):
 # 需求： 出现macd两个及其以上红色空心柱子。
 def recently_macd_red_get_shorter_range(macd_height_serize):
     if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
-        logger.debug(f"MACD红色空心柱子高度序列长度小于2，序列：{macd_height_serize.iloc[:].tolist()}")
+        logger.debug(f"MACD序列长度小于2，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
         return 0
     if macd_height_serize.iloc[-1] >= 0:  # <0 才能出现红色柱子
-        logger.debug(f"MACD红色空心柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} >= 0，序列最新部分：{macd_height_serize.iloc[ -2:].tolist()}")
+        logger.debug(f"MACD红色空心柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} >= 0，不满足先决条件。序列最新部分：{macd_height_serize.iloc[ -2:].tolist()}")
         return 0
     else:
         if macd_height_serize.iloc[-1] < macd_height_serize.iloc[-2]:  # 递增才能出现空心柱子，递减跳出返回0
-            logger.debug(f"MACD红色空心柱子高度序列最后两根柱子高度{macd_height_serize.iloc[-1]} < {macd_height_serize.iloc[-2]}")
+            logger.debug(f"MACD序列最后两根柱子高度{macd_height_serize.iloc[-1]} < {macd_height_serize.iloc[-2]} ，出现红色实心柱")
             return 0
         else:
             for i in range(1, len(macd_height_serize), 1):
@@ -239,10 +239,10 @@ def recently_macd_red_get_shorter_range(macd_height_serize):
 # 需求：两个及以上绿色柱子（全实心或者全空心或者一实心一空心）
 def recently_macd_green_range(macd_height_serize):
     if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
-        logger.debug(f"MACD绿色柱子高度序列长度小于2，序列：{macd_height_serize.iloc[:].tolist()}")
+        logger.debug(f"MACD序列长度小于2，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
         return 1 if macd_height_serize.iloc[-1] > 0 else 0
     if macd_height_serize.iloc[-1] < 0:  # <0 是红色柱子，不符合需求
-        logger.debug(f"MACD柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} < 0，序列最新部分：{macd_height_serize.iloc[-2:].tolist()}")
+        logger.debug(f"MACD柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} < 0，序列最新部分：{macd_height_serize.iloc[-2:].tolist()}。出现红柱")
         return 0
     elif macd_height_serize.iloc[-1] > 0 > macd_height_serize.iloc[-2]:  # >0 是绿色柱子
         logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-1]}，前一根红色柱子高度{macd_height_serize.iloc[-2]}")
@@ -261,13 +261,13 @@ def recently_macd_green_range(macd_height_serize):
 # 需求：一红一绿（无所谓空心实心）-- 实现为先红后绿
 def recently_macd_green_and_elder_red(macd_height_serize):
     if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
-        logger.debug(f"MACD红色和绿色柱子高度序列长度小于2，序列：{macd_height_serize.iloc[:].tolist()}")
+        logger.debug(f"MACD红色和绿色柱子高度序列长度小于2，无法进行比较。序列：{macd_height_serize.iloc[:].tolist()}")
         return False
     if macd_height_serize.iloc[-1] > 0 > macd_height_serize.iloc[-2]:  # >0 是绿色柱子
         logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-1]}，前一根红色柱子高度{macd_height_serize.iloc[-2]}")
         return True
     else:
-        logger.debug(f"MACD高度序列最后两根柱子高度{macd_height_serize.iloc[-2]} {macd_height_serize.iloc[-1]}")
+        logger.debug(f"MACD高度序列最后两根柱子高度{macd_height_serize.iloc[-2]} {macd_height_serize.iloc[-1]} ，未出现先红后绿")
         return False
 
 
@@ -279,11 +279,11 @@ def recently_macd_red_with_candles_red(macd_height_serize, prices_open_serize, p
     if (macd_height_serize.iloc[-1] < 0 and macd_height_serize.iloc[-1] < macd_height_serize.iloc[-2]) and \
             prices_open_serize.iloc[-1] > prices_close_serize.iloc[-1]:  # <0 并降序是红色实心柱子
         logger.debug(
-            f"MACD序列部分最新数据： {macd_height_serize.iloc[-2:]} ，对应K线开盘价{prices_open_serize.iloc[-1]}，收盘价{prices_close_serize.iloc[-1]}")
+            f"MACD序列部分最新数据： {macd_height_serize.iloc[-2:].tolist()} ，对应K线开盘价{prices_open_serize.iloc[-1]}，收盘价{prices_close_serize.iloc[-1]}")
         return True
     else:
         logger.debug(
-            f"MACD序列部分最新数据： {macd_height_serize.iloc[-2:]} ，对应K线开盘价{prices_open_serize.iloc[-1]}，收盘价{prices_close_serize.iloc[-1]}")
+            f"MACD序列部分最新数据： {macd_height_serize.iloc[-2:].tolist()} ，对应K线开盘价{prices_open_serize.iloc[-1]}，收盘价{prices_close_serize.iloc[-1]}，未满足条件。")
         return False
 
 
@@ -328,7 +328,7 @@ def transfrom_data_and_eval(symbol, time_frame):
             recently_macd_red_get_shorter_range(df['MACD_hist']) >= 2 or
             recently_macd_green_range(df['MACD_hist']) >= 2 or
             recently_macd_green_and_elder_red(df['MACD_hist'])
-    ) and recently_macd_red_with_candles_red:
+    ) and recently_macd_red_with_candles_red(df['MACD_hist'], df['open'], df['close']):
         logger.warning(f"{symbol} {time_frame} 前提1~3均满足，触发告警准备。")
         return True, max_ts
     else:
