@@ -37,13 +37,14 @@ alert_period = 5 * 60  # 5分钟
 # 设置日志级别（DEBUG 会显示所有信息 INFO  常规信息 WARNING 警告 ERROR 错误 CRITICAL 致命错误 ）
 # 控制台处理器（显示 DEBUG 以上）
 logger = logging.getLogger('main_logger')
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter('【%(asctime)s】 - %(levelname)s - %(message)s')
+
+# 控制台处理器（显示 DEBUG 以上）
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.DEBUG)
-# 设置日志格式
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-logger.setLevel(logging.DEBUG)
 
 # 手动设置代理
 proxies = {
@@ -52,7 +53,7 @@ proxies = {
 }
 
 # 打印代理信息
-print(f"手动设置的代理: {proxies}")
+logger.info(f"手动设置的代理: {proxies}")
 
 exchange = ccxt.okx({
     'proxies': proxies,
@@ -119,14 +120,18 @@ def alert_sound_loop():
     global alert_stop_event
     sound_file = 'alert.wav'
     try:
-        winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_LOOP | winsound.SND_ASYNC)
+        logger.info("开始播放告警声音...")
+        winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
         pause_button.config(state=tk.NORMAL)
-        while not alert_stop_event.is_set():
+        start_time = time.time()  # 记录开始时间
+        logger.info("告警声音播放中...")
+        while not alert_stop_event.is_set() and time.time() - start_time < 5 * 60:  # 5分钟
             time.sleep(0.1)  # 检查停止事件
         winsound.PlaySound(None, winsound.SND_PURGE)  # 停止播放
         root.after(0, pause_button.config, {"state": tk.DISABLED})  # 禁用按钮
+        logger.info("告警声音播放结束。")
     except Exception as e:
-        print(f"播放声音文件时发生错误: {e}")
+        logger.error(f"播放声音文件时发生错误: {e}")
         traceback.print_exc()
 
 
@@ -156,7 +161,7 @@ def save_to_sqlite(candles, symbol, time_frame):
           )
         ''')
     except sqlite3.Error as e:
-        print(f"Database connection error: {e}")
+        logger.error(f"Database connection error: {e}")
         return False
 
     # 插入数据
@@ -170,7 +175,7 @@ def save_to_sqlite(candles, symbol, time_frame):
         ''', candles)
         conn.commit()
     except Exception as e:
-        print(f"查询出错: {e}")
+        logger.error(f"查询出错: {e}")
         return False
 
     # 检查数据增量
@@ -185,7 +190,7 @@ def save_to_sqlite(candles, symbol, time_frame):
             cursor.close()
             return None
     except Exception as e:
-        print(f"查询出错: {e}")
+        logger.error(f"查询出错: {e}")
         cursor.close()
         return False
 
@@ -197,13 +202,13 @@ def load_from_sqlite(symbol, time_frame, limit=400):
         # 从数据库读取增量数据-目前需求-读取400条足够-区间太小会引入指标计算误差-也避免了处理在某些情况下可能存在的周期缺失问题。
         # 以后如果要处理长周期数据，再改造这里，增加使用sql检测数据连续性的语句。
         df = pd.read_sql('''
-            SELECT 
+            SELECT
                 ts AS timestamp,open_price as open,high_price as high, low_price as low, close_price as close, volume
-            FROM ''' + symbol.replace('/', '_') + '_' + time_frame + ''' 
+            FROM ''' + symbol.replace('/', '_') + '_' + time_frame + '''
             ORDER BY ts desc limit ''' + str(limit), conn)
         max_ts = df['timestamp'].max()
     except sqlite3.Error as e:
-        print(f"Database connection error: {e}")
+        logger.error(f"Database connection error: {e}")
         return False
     conn.close()
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -299,7 +304,7 @@ def chk_current_ema60_greater_than_ema20(ema60, ema20):
 
 
 def transfrom_data_and_eval(symbol, time_frame):
-    df,max_ts = load_from_sqlite(symbol, time_frame)
+    df, max_ts = load_from_sqlite(symbol, time_frame)
     df = df.sort_values('timestamp', ascending=True)  # 确保时间序列按日期升序排列
 
     # 转换数据类型
@@ -366,7 +371,7 @@ def main_loop():
             update_plot()  # 更新图表
 
         except Exception as e:
-            print(f"发生错误: {type(e).__name__}: {e}")
+            logger.error(f"发生错误: {type(e).__name__}: {e}")
             traceback.print_exc()
 
         # main_loop 不再使用 time.sleep 阻塞主线程，而是通过 root.after 每 60 秒触发一次数据查询和评估。
@@ -453,13 +458,13 @@ def update_plot():
         canvas.draw()
 
     except Exception as e:
-        print(f"更新图表时发生错误: {type(e).__name__}: {e}")
+        logger.error(f"更新图表时发生错误: {type(e).__name__}: {e}")
         traceback.print_exc()
 
 
 # 创建主窗口
 root = tk.Tk()
-root.title("交易监控程序")
+root.title("ETH/USDT 交易监控程序")
 
 # 创建按钮
 start_stop_button = ttk.Button(root, text="启动程序", command=start_stop_program)
@@ -467,6 +472,32 @@ pause_button = ttk.Button(root, text="暂停本次告警", command=pause_alert, 
 
 # 状态标签
 status_label = tk.Label(root, text="程序未运行")
+
+# 创建 Text 组件用于显示日志
+log_text = tk.Text(root, height=10)
+
+class TextHandler(logging.Handler):
+    def __init__(self, text, max_lines=1000):
+        super().__init__()
+        self.text = text
+        self.max_lines = max_lines
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.text.insert(tk.END, msg + '\n')
+        self.text.see(tk.END)  # 自动滚动到底部
+        self.trim_log()  # 限制日志行数
+
+    def trim_log(self):
+        line_count = int(self.text.index('end - 1 line').split('.')[0])
+        if line_count > self.max_lines:
+            self.text.delete('1.0', f'{line_count - self.max_lines}.0')
+
+# 创建 TextHandler 并添加到 logger
+text_handler = TextHandler(log_text, max_lines=1000)
+text_handler.setFormatter(formatter)
+logger.addHandler(text_handler)
+
 
 # 创建图表
 fig, ax = plt.subplots(figsize=(10, 4))
@@ -477,6 +508,7 @@ canvas_widget = canvas.get_tk_widget()
 start_stop_button.pack(pady=5)
 pause_button.pack(pady=5)
 status_label.pack(pady=5)
+log_text.pack(pady=5, fill=tk.X)
 canvas_widget.pack(pady=10)
 
 # 启动主循环
