@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import ttk
+import os
+from tkinter import ttk, messagebox
 import threading
 import time
 import matplotlib.pyplot as plt
@@ -12,7 +13,6 @@ import sqlite3
 import pandas as pd
 import talib
 import logging
-from matplotlib.gridspec import GridSpec
 import mplfinance as mpf
 
 # 全局变量及参数设置
@@ -38,7 +38,7 @@ alert_period = 5 * 60  # 5分钟
 # 控制台处理器（显示 DEBUG 以上）
 logger = logging.getLogger('main_logger')
 logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter('【%(asctime)s】 - %(levelname)s - %(message)s')
+formatter = logging.Formatter('【%(asctime)s】 - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 # 控制台处理器（显示 DEBUG 以上）
 console_handler = logging.StreamHandler()
@@ -47,18 +47,15 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 # 手动设置代理
-proxies = {
-    'http': 'http://127.0.0.1:7897',
-    'https': 'http://127.0.0.1:7897'
-}
+# proxies = {
+#     'http': 'http://127.0.0.1:7897',
+#     'https': 'http://127.0.0.1:7897'
+# }
 
 # 打印代理信息
-logger.info(f"手动设置的代理: {proxies}")
+# logger.info(f"手动设置的代理: {proxies}")
 
-exchange = ccxt.okx({
-    'proxies': proxies,
-})
-
+exchange = None
 
 def calculate_ema(data, period):
     ema = [sum(data[:period]) / period]
@@ -135,18 +132,15 @@ def alert_sound_loop():
         traceback.print_exc()
 
 
-def get_max_time(db_path, symbol, time_frame):
-    with sqlite3.connect(db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute('SELECT MAX(ts) FROM ' + symbol.replace('/', '_') + '_' + time_frame)
-        result = cursor.fetchone()[0]
-        return result if result is not None else 0
+def get_max_time(conn, symbol, time_frame):
+    cursor = conn.cursor()
+    cursor.execute('SELECT MAX(ts) FROM ' + symbol.replace('/', '_') + '_' + time_frame)
+    result = cursor.fetchone()[0]
+    return result if result is not None else 0
 
 
-def save_to_sqlite(candles, symbol, time_frame):
-    # 连接到 SQLite 数据库（如果不存在则会创建）
+def save_to_sqlite(conn, candles, symbol, time_frame):
     try:
-        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         # 创建表（如果不存在）
         cursor.execute('''
@@ -166,7 +160,7 @@ def save_to_sqlite(candles, symbol, time_frame):
 
     # 插入数据
     try:
-        max_time_1 = get_max_time(db_path, symbol, time_frame)
+        max_time_1 = get_max_time(conn, symbol, time_frame)
         logger.debug(
             f"{symbol} {time_frame} 抓取前最新记录: {datetime.fromtimestamp(max_time_1 / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
         cursor.executemany('''
@@ -180,27 +174,22 @@ def save_to_sqlite(candles, symbol, time_frame):
 
     # 检查数据增量
     try:
-        max_time_2 = get_max_time(db_path, symbol, time_frame)
+        max_time_2 = get_max_time(conn, symbol, time_frame)
         logger.debug(
             f"{symbol} {time_frame} 抓取后最新记录: {datetime.fromtimestamp(max_time_2 / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
         if max_time_1 < max_time_2:  # 有增量数据，触发评估动作
-            cursor.close()
             return True
         else:  # 无增量数据，do nothing  。  修改，无增量数据也需要 进行评估，原因是最新K线必定发生变化，可能影响指标计算。
-            cursor.close()
             return None
     except Exception as e:
         logger.error(f"查询出错: {e}")
-        cursor.close()
         return False
 
 
-def load_from_sqlite(symbol, time_frame, limit=400):
-    # 连接到 SQLite 数据库
+def load_from_sqlite(conn, symbol, time_frame, limit=400):
+    # 从数据库读取增量数据-目前需求-读取400条足够-区间太小会引入指标计算误差-也避免了处理在某些情况下可能存在的周期缺失问题。
+    # 以后如果要处理长周期数据，再改造这里，增加使用sql检测数据连续性的语句。
     try:
-        conn = sqlite3.connect(db_path)
-        # 从数据库读取增量数据-目前需求-读取400条足够-区间太小会引入指标计算误差-也避免了处理在某些情况下可能存在的周期缺失问题。
-        # 以后如果要处理长周期数据，再改造这里，增加使用sql检测数据连续性的语句。
         df = pd.read_sql('''
             SELECT
                 ts AS timestamp,open_price as open,high_price as high, low_price as low, close_price as close, volume
@@ -209,8 +198,7 @@ def load_from_sqlite(symbol, time_frame, limit=400):
         max_ts = df['timestamp'].max()
     except sqlite3.Error as e:
         logger.error(f"Database connection error: {e}")
-        return False
-    conn.close()
+        return False, None
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df = df.sort_values('timestamp')
     df = df.set_index('timestamp')
@@ -303,8 +291,10 @@ def chk_current_ema60_greater_than_ema20(ema60, ema20):
         return False
 
 
-def transfrom_data_and_eval(symbol, time_frame):
-    df, max_ts = load_from_sqlite(symbol, time_frame)
+def transfrom_data_and_eval(conn, symbol, time_frame):
+    df, max_ts = load_from_sqlite(conn, symbol, time_frame)
+    if df is False:
+        return False, max_ts
     df = df.sort_values('timestamp', ascending=True)  # 确保时间序列按日期升序排列
 
     # 转换数据类型
@@ -340,17 +330,17 @@ def transfrom_data_and_eval(symbol, time_frame):
         return False, max_ts
 
 
-def main_loop():
-    global running, alert_trigger_at, alert_thread
+def main_loop(conn):
+    global running, alert_trigger_at, alert_thread, exchange
     if running and not stop_event.is_set():
         try:
             for i in (timeframe_15m, timeframe_30m):
                 candles = exchange.fetch_ohlcv(symbol, i, limit=1440)
                 logger.info(f"保存 {symbol} {i} K线数据:")
-                ss = save_to_sqlite(candles, symbol, i)
+                ss = save_to_sqlite(conn, candles, symbol, i)
                 if ss in (True, None):
                     logger.info(f"{symbol} {i} K线数据保存成功，开始评估数据。")
-                    eval_result, eva_time = transfrom_data_and_eval(symbol, i)
+                    eval_result, eva_time = transfrom_data_and_eval(conn, symbol, i)
                     if eval_result and eva_time > alert_trigger_at:
                         logger.warning(f"{symbol} {i} 条件满足，触发告警。")
                         alert_trigger_at = eva_time
@@ -368,7 +358,7 @@ def main_loop():
                 else:
                     logger.error(f"{symbol} {i} 出现逻辑之外的异常，需排查代码，跳过后续处理。")
 
-            update_plot()  # 更新图表
+            # update_plot()  # 更新图表
 
         except Exception as e:
             logger.error(f"发生错误: {type(e).__name__}: {e}")
@@ -376,10 +366,18 @@ def main_loop():
 
         # main_loop 不再使用 time.sleep 阻塞主线程，而是通过 root.after 每 60 秒触发一次数据查询和评估。
         # 点击停止程序时，可以立即停止 main_loop 的循环调用，从而避免界面卡死。
-        root.after(60000, main_loop)  # 60秒后再次调用 main_loop
+        root.after(60000, lambda: main_loop(conn))  # 60秒后再次调用 main_loop
 
-def start_stop_program():
-    global running, thread
+
+def start_stop_program(conn):
+    # 日期校验：超过 2025-06-04 不允许启动
+    now = datetime.now()
+    target_date = datetime(2025, 7, 2, 0, 0, 0)
+    if now > target_date:
+        messagebox.showerror("启动失败", "当前试用版本截止日期2025年7月2日，试用已过期")
+        logger.info("启动失败：当前试用版本截止日期2025年7月2日，试用已过期")
+        return
+    global running, thread, exchange
     if running:
         # 如果程序正在运行，则停止程序
         running = False
@@ -392,7 +390,30 @@ def start_stop_program():
         # 如果程序未运行，则启动程序
         running = True
         stop_event.clear()  # 清除停止事件
-        thread = threading.Thread(target=main_loop)
+
+        # 获取代理端口
+        proxy_port = proxy_entry.get()
+
+        # 构造完整的代理 URL
+        http_proxy = f'http://127.0.0.1:{proxy_port}'
+        https_proxy = f'http://127.0.0.1:{proxy_port}'
+
+        # 构造代理字典
+        proxies = {
+            'http': http_proxy,
+            'https': https_proxy
+        }
+
+        # 打印代理信息
+        logger.info(f"手动设置的代理: {proxies}")
+
+        # 初始化 exchange 对象
+        global exchange
+        exchange = ccxt.okx({
+            'proxies': proxies,
+        })
+
+        thread = threading.Thread(target=lambda: main_loop(conn))
         thread.start()
         status_label.config(text="程序运行中...")
         start_stop_button.config(text="停止程序")  # 更改按钮文本
@@ -402,6 +423,7 @@ def pause_alert():
     global alert_thread, alert_stop_event
     if alert_thread and alert_thread.is_alive():
         alert_stop_event.set()  # 设置告警停止事件
+        winsound.PlaySound(None, winsound.SND_PURGE)
         pause_button.config(state=tk.DISABLED)
         logger.info("告警已暂停。")
     else:
@@ -411,7 +433,7 @@ def pause_alert():
 def update_plot():
     try:
         # 获取最近4小时的数据 (假设 timeframe_15m 是 15 分钟)
-        df, _ = load_from_sqlite(symbol, timeframe_15m, limit=4 * 16)  # 4 小时 = 16 个 15 分钟周期
+        df, _ = load_from_sqlite(conn, symbol, timeframe_15m, limit=4 * 16)  # 4 小时 = 16 个 15 分钟周期
         if df is False:
             logger.error("无法从数据库加载数据，跳过图表更新。")
             return
@@ -466,8 +488,11 @@ def update_plot():
 root = tk.Tk()
 root.title("ETH/USDT 交易监控程序")
 
+proxy_entry = tk.Entry(root, width=6)
+proxy_entry.pack(padx=5, pady=5, anchor='w')
+
 # 创建按钮
-start_stop_button = ttk.Button(root, text="启动程序", command=start_stop_program)
+start_stop_button = ttk.Button(root, text="启动程序", command=lambda: start_stop_program(conn))
 pause_button = ttk.Button(root, text="暂停本次告警", command=pause_alert, state=tk.DISABLED)  # 初始状态禁用
 
 # 状态标签
@@ -475,6 +500,7 @@ status_label = tk.Label(root, text="程序未运行")
 
 # 创建 Text 组件用于显示日志
 log_text = tk.Text(root, height=10)
+
 
 class TextHandler(logging.Handler):
     def __init__(self, text, max_lines=1000):
@@ -493,6 +519,7 @@ class TextHandler(logging.Handler):
         if line_count > self.max_lines:
             self.text.delete('1.0', f'{line_count - self.max_lines}.0')
 
+
 # 创建 TextHandler 并添加到 logger
 text_handler = TextHandler(log_text, max_lines=1000)
 text_handler.setFormatter(formatter)
@@ -504,12 +531,32 @@ fig, ax = plt.subplots(figsize=(10, 4))
 canvas = FigureCanvasTkAgg(fig, master=root)
 canvas_widget = canvas.get_tk_widget()
 
+
+# 定义关闭窗口时的处理函数
+def on_closing(conn):
+    global running, thread, alert_thread
+    running = False
+    stop_event.set()  # 设置停止事件
+    alert_stop_event.set()  # 设置告警停止事件
+    pause_alert()  # 确保停止告警声音
+    if thread and thread.is_alive():
+        thread.join()  # 等待主循环线程结束
+    if alert_thread and alert_thread.is_alive():
+        alert_thread.join()  # 等待告警线程结束
+    conn.close()
+    root.quit()
+    os._exit(0)
+
 # 布局
 start_stop_button.pack(pady=5)
 pause_button.pack(pady=5)
 status_label.pack(pady=5)
 log_text.pack(pady=5, fill=tk.X)
-canvas_widget.pack(pady=10)
+#canvas_widget.pack(pady=10)
+
+# 使用同一个数据库连接
+conn = sqlite3.connect(db_path, check_same_thread=False)
+root.protocol("WM_DELETE_WINDOW", lambda: on_closing(conn))
 
 # 启动主循环
 root.mainloop()

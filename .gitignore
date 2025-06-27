@@ -1,2 +1,5 @@
 candles_history.db
+__pycache__/
 .idea/
+dist/
+build/
