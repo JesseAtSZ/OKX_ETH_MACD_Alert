@@ -205,62 +205,62 @@ def load_from_sqlite(conn, symbol, time_frame, limit=400):
     return df, max_ts
 
 
-# 需求： 出现macd两个及其以上红色空心柱子。
+# 需求： 出现macd两个及其以上红色空心柱子。（新需求，不包含自身，在完全完成的K线中进行评估）
 def recently_macd_red_get_shorter_range(macd_height_serize):
-    if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
-        logger.debug(f"MACD序列长度小于2，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
+    if len(macd_height_serize) < 4:  # 如果序列长度小于4，则不能进行比较
+        logger.debug(f"MACD序列长度小于4，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
         return 0
-    if macd_height_serize.iloc[-1] >= 0:  # <0 才能出现红色柱子
-        logger.debug(f"MACD红色空心柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} >= 0，不满足先决条件。序列最新部分：{macd_height_serize.iloc[ -2:].tolist()}")
+    if macd_height_serize.iloc[-2] >= 0:  # <0 才能出现红色柱子，大于0，绿色直接退出
+        logger.debug(f"MACD已完成序列的最新值的高度{macd_height_serize.iloc[-2]} >= 0，不满足先决条件。序列最新部分：{macd_height_serize.iloc[ -2:].tolist()}")
         return 0
     else:
-        if macd_height_serize.iloc[-1] < macd_height_serize.iloc[-2]:  # 递增才能出现空心柱子，递减跳出返回0
-            logger.debug(f"MACD序列最后两根柱子高度{macd_height_serize.iloc[-1]} < {macd_height_serize.iloc[-2]} ，出现红色实心柱")
+        if macd_height_serize.iloc[-2] < macd_height_serize.iloc[-3]:  # 值递增才能出现空心柱子，递减跳出返回0
+            logger.debug(f"MACD序列最后两根柱子高度{macd_height_serize.iloc[-2]} < {macd_height_serize.iloc[-3]} ，出现红色实心柱")
             return 0
         else:
-            for i in range(1, len(macd_height_serize), 1):
+            for i in range(2, len(macd_height_serize), 1):
                 if macd_height_serize.iloc[-i] > macd_height_serize.iloc[-i - 1]:
                     pass
                 else:  # 返回红色空心柱子的根数
-                    logger.debug(f"MACD红色空心柱子高度序列的最小父序列 {macd_height_serize.iloc[-i:].tolist()} 根数：{i - 1}")
-                    return i - 1
+                    logger.debug(f"MACD红色空心柱子高度序列的最小父序列 {macd_height_serize.iloc[-i-1:-2].tolist()} 根数：{i - 2}")
+                    return i - 2
             logger.debug(
-                f"从第二根开始都是红色空心的{macd_height_serize.iloc[:].tolist()} 根数：{len(macd_height_serize)-1}")
-            return len(macd_height_serize)-1
+                f"从第二根开始都是红色空心的{macd_height_serize.iloc[:-2].tolist()} 根数：{len(macd_height_serize)-2}")
+            return len(macd_height_serize)-2
 
 
-# 需求：两个及以上绿色柱子（全实心或者全空心或者一实心一空心）
+# 需求：两个及以上绿色柱子（全实心或者全空心或者一实心一空心）。（新需求，不包含自身，在完全完成的K线中进行评估）
 def recently_macd_green_range(macd_height_serize):
-    if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
-        logger.debug(f"MACD序列长度小于2，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
+    if len(macd_height_serize) < 3:  # 如果序列长度小于3，则不能进行比较
+        logger.debug(f"MACD序列长度小于3，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
         return 1 if macd_height_serize.iloc[-1] > 0 else 0
-    if macd_height_serize.iloc[-1] < 0:  # <0 是红色柱子，不符合需求
-        logger.debug(f"MACD柱子高度序列最后一根柱子高度{macd_height_serize.iloc[-1]} < 0，序列最新部分：{macd_height_serize.iloc[-2:].tolist()}。出现红柱")
+    if macd_height_serize.iloc[-2] < 0:  # <0 是红色柱子，不符合需求
+        logger.debug(f"MACD柱子高度序列最后第二根柱子高度{macd_height_serize.iloc[-2]} < 0，不符合需求。序列最新部分：{macd_height_serize.iloc[-3:].tolist()}。出现红柱")
         return 0
-    elif macd_height_serize.iloc[-1] > 0 > macd_height_serize.iloc[-2]:  # >0 是绿色柱子
-        logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-1]}，前一根红色柱子高度{macd_height_serize.iloc[-2]}")
+    elif macd_height_serize.iloc[-2] > 0 > macd_height_serize.iloc[-3]:  # >0 是绿色柱子
+        logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-2]}，前一根红色柱子高度{macd_height_serize.iloc[-3]}")
         return 1
     else:
-        for i in range(1, len(macd_height_serize) + 1, 1):
+        for i in range(2, len(macd_height_serize) + 1, 1):
             if macd_height_serize.iloc[-i] > 0:
                 pass
             else:  # 返回绿色柱子的根数
-                logger.debug(f"MACD绿色柱子高度序列的最小父序列{macd_height_serize.iloc[-i:].tolist()} 根数：{i - 1}")
-                return i - 1
-        logger.debug(f"所有柱子都是绿的{macd_height_serize.iloc[:].tolist()} 根数：{len(macd_height_serize)}")
-        return len(macd_height_serize)
+                logger.debug(f"MACD绿色柱子高度序列的最小父序列{macd_height_serize.iloc[-i:-2].tolist()} 根数：{i - 2}")
+                return i - 2
+        logger.debug(f"所有柱子都是绿的{macd_height_serize.iloc[:-1].tolist()} 根数：{len(macd_height_serize)-1}")
+        return len(macd_height_serize)-1
 
 
-# 需求：一红一绿（无所谓空心实心）-- 实现为先红后绿
+# 需求：一红一绿（无所谓空心实心）-- 实现为先红后绿。（新需求，不包含自身，在完全完成的K线中进行评估）
 def recently_macd_green_and_elder_red(macd_height_serize):
-    if len(macd_height_serize) < 2:  # 如果序列长度小于2，则不能进行比较
-        logger.debug(f"MACD红色和绿色柱子高度序列长度小于2，无法进行比较。序列：{macd_height_serize.iloc[:].tolist()}")
+    if len(macd_height_serize) < 3:  # 如果序列长度小于3，则不能进行比较
+        logger.debug(f"MACD红色和绿色柱子高度序列长度小于3，无法进行比较。序列：{macd_height_serize.iloc[:].tolist()}")
         return False
-    if macd_height_serize.iloc[-1] > 0 > macd_height_serize.iloc[-2]:  # >0 是绿色柱子
-        logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-1]}，前一根红色柱子高度{macd_height_serize.iloc[-2]}")
+    if macd_height_serize.iloc[-2] > 0 > macd_height_serize.iloc[-3]:  # >0 是绿色柱子
+        logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-2]}，前一根红色柱子高度{macd_height_serize.iloc[-3]}")
         return True
     else:
-        logger.debug(f"MACD高度序列最后两根柱子高度{macd_height_serize.iloc[-2]} {macd_height_serize.iloc[-1]} ，未出现先红后绿")
+        logger.debug(f"MACD高度序列最后两根柱子高度{macd_height_serize.iloc[-3]} {macd_height_serize.iloc[-2]} ，未出现先红后绿")
         return False
 
 
