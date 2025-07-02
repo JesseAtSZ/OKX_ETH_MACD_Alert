@@ -29,9 +29,10 @@ slow_period = 34
 signal_period = 5
 ema_period_20 = 20
 ema_period_60 = 60
-db_path = 'candles_history.db'
+db_path = 'candles_history_for_test.db'
 alert_trigger_at = 0  # 初始化告警触发时间
 alert_period = 5 * 60  # 5分钟
+debug_alert = True  # 是否开启调试告警 ，正式环境必须关闭 为 False
 
 # 设置日志打印级别，便于调试
 # 设置日志级别（DEBUG 会显示所有信息 INFO  常规信息 WARNING 警告 ERROR 错误 CRITICAL 致命错误 ）
@@ -348,7 +349,7 @@ def main_loop(conn):
                 if ss in (True, None):
                     logger.info(f"{symbol} {i} K线数据保存成功，开始评估数据。")
                     eval_result, eva_time = transfrom_data_and_eval(conn, symbol, i)
-                    if eval_result and eva_time > alert_trigger_at:
+                    if (eval_result and eva_time > alert_trigger_at) or debug_alert:
                         logger.warning(f"{symbol} {i} 条件满足，触发告警。")
                         alert_trigger_at = eva_time
                         alert_stop_event.clear()
@@ -381,8 +382,8 @@ def start_stop_program(conn):
     now = datetime.now()
     target_date = datetime(2025, 7, 9, 0, 0, 0)
     if now > target_date:
-        messagebox.showerror("启动失败", "当前试用版本截止日期2025年7月2日，试用已过期")
-        logger.info("启动失败：当前试用版本截止日期2025年7月2日，试用已过期")
+        messagebox.showerror("启动失败", "当前试用版本截止日期2025年7月9日，试用已过期")
+        logger.info("启动失败：当前试用版本截止日期2025年7月9日，试用已过期")
         return
     global running, thread, exchange
     if running:

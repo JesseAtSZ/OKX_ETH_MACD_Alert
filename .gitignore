@@ -1,5 +1,6 @@
-candles_history.db
+candles_history_for_test.db
 __pycache__/
 .idea/
 dist/
 build/
+eth_monitor.log
