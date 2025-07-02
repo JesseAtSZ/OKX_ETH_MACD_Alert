@@ -12,8 +12,8 @@ from datetime import datetime, timedelta
 import sqlite3
 import pandas as pd
 import talib
-import logging
 import mplfinance as mpf
+import logging.handlers
 
 # 全局变量及参数设置
 running = False
@@ -39,19 +39,14 @@ debug_alert = True  # 是否开启调试告警 ，正式环境必须关闭 为 F
 # 控制台处理器（显示 DEBUG 以上）
 logger = logging.getLogger('main_logger')
 logger.setLevel(logging.DEBUG)
-formatter = logging.Formatter('【%(asctime)s】 - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
-# 控制台处理器（显示 DEBUG 以上）
-# console_handler = logging.StreamHandler()
-# console_handler.setLevel(logging.DEBUG)
-# console_handler.setFormatter(formatter)
-# logger.addHandler(console_handler)
-
 
 log_file = 'eth_monitor.log'
-file_handler = logging.FileHandler(log_file, encoding='utf-8')
+file_formatter = logging.Formatter('【%(asctime)s】 - %(levelname)s - %(message)s',
+                                   datefmt='%Y-%m-%d %H:%M:%S')
+file_handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=10 * 10 * 1024, backupCount=2,
+                                                    encoding='utf-8')
 file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(formatter)
+file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
 
 # 手动设置代理
@@ -125,85 +120,93 @@ def alert_sound_loop():
     global alert_stop_event
     sound_file = 'alert.wav'
     try:
-        logger.info("开始播放告警声音...")
         winsound.PlaySound(sound_file, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
         pause_button.config(state=tk.NORMAL)
         start_time = time.time()  # 记录开始时间
-        logger.info("告警声音播放中...")
         while not alert_stop_event.is_set() and time.time() - start_time < 5 * 60:  # 5分钟
             time.sleep(0.1)  # 检查停止事件
         winsound.PlaySound(None, winsound.SND_PURGE)  # 停止播放
         root.after(0, pause_button.config, {"state": tk.DISABLED})  # 禁用按钮
-        logger.info("告警声音播放结束。")
     except Exception as e:
-        logger.error(f"播放声音文件时发生错误: {e}")
         traceback.print_exc()
+    finally:
+        # 清理线程资源
+        alert_stop_event.clear()
+        global alert_thread
+        alert_thread = None
 
 
-def get_max_time(conn, symbol, time_frame):
-    cursor = conn.cursor()
-    cursor.execute('SELECT MAX(ts) FROM ' + symbol.replace('/', '_') + '_' + time_frame)
-    result = cursor.fetchone()[0]
-    return result if result is not None else 0
-
-
-def save_to_sqlite(conn, candles, symbol, time_frame):
-    try:
+def get_max_time(symbol, time_frame):
+    with sqlite3.connect(db_path) as conn:
         cursor = conn.cursor()
-        # 创建表（如果不存在）
-        cursor.execute('''
-          CREATE TABLE IF NOT EXISTS ''' + symbol.replace('/', '_') + '_' + time_frame + ''' (
-              ts INTEGER,
-              open_price TEXT,
-              high_price TEXT,
-              low_price TEXT,
-              close_price TEXT,
-              volume TEXT,
-              PRIMARY KEY(ts)
-          )
-        ''')
+        cursor.execute('SELECT MAX(ts) FROM ' + symbol.replace('/', '_') + '_' + time_frame)
+        result = cursor.fetchone()[0]
+        return result if result is not None else 0
+
+
+def save_to_sqlite(candles, symbol, time_frame):
+    try:
+        with sqlite3.connect(db_path) as conn:
+            # 创建表（如果不存在）
+            cursor = conn.cursor()
+            cursor.execute('''
+              CREATE TABLE IF NOT EXISTS ''' + symbol.replace('/', '_') + '_' + time_frame + ''' (
+                  ts INTEGER,
+                  open_price TEXT,
+                  high_price TEXT,
+                  low_price TEXT,
+                  close_price TEXT,
+                  volume TEXT,
+                  PRIMARY KEY(ts)
+              )
+            ''')
+
     except sqlite3.Error as e:
         logger.error(f"Database connection error: {e}")
         return False
 
     # 插入数据
     try:
-        max_time_1 = get_max_time(conn, symbol, time_frame)
-        logger.debug(
-            f"{symbol} {time_frame} 抓取前最新记录: {datetime.fromtimestamp(max_time_1 / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
-        cursor.executemany('''
-            INSERT OR REPLACE INTO ''' + symbol.replace('/', '_') + '_' + time_frame + '''(ts, open_price, high_price, low_price, close_price, volume)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', candles)
-        conn.commit()
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            max_time_1 = get_max_time(symbol, time_frame)
+            logger.debug(
+                f"{symbol} {time_frame} 抓取前最新记录: {datetime.fromtimestamp(max_time_1 / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
+            cursor.executemany('''
+                INSERT OR REPLACE INTO ''' + symbol.replace('/', '_') + '_' + time_frame + '''(ts, open_price, high_price, low_price, close_price, volume)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', candles)
+            conn.commit()
     except Exception as e:
         logger.error(f"查询出错: {e}")
         return False
 
     # 检查数据增量
     try:
-        max_time_2 = get_max_time(conn, symbol, time_frame)
-        logger.debug(
-            f"{symbol} {time_frame} 抓取后最新记录: {datetime.fromtimestamp(max_time_2 / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
-        if max_time_1 < max_time_2:  # 有增量数据，触发评估动作
-            return True
-        else:  # 无增量数据，do nothing  。  修改，无增量数据也需要 进行评估，原因是最新K线必定发生变化，可能影响指标计算。
-            return None
+        with sqlite3.connect(db_path) as conn:
+            max_time_2 = get_max_time(symbol, time_frame)
+            logger.debug(
+                f"{symbol} {time_frame} 抓取后最新记录: {datetime.fromtimestamp(max_time_2 / 1000).strftime('%Y-%m-%d %H:%M:%S')}")
+            if max_time_1 < max_time_2:  # 有增量数据，触发评估动作
+                return True
+            else:  # 无增量数据，do nothing  。  修改，无增量数据也需要 进行评估，原因是最新K线必定发生变化，可能影响指标计算。
+                return None
     except Exception as e:
         logger.error(f"查询出错: {e}")
         return False
 
 
-def load_from_sqlite(conn, symbol, time_frame, limit=400):
+def load_from_sqlite(symbol, time_frame, limit=400):
     # 从数据库读取增量数据-目前需求-读取400条足够-区间太小会引入指标计算误差-也避免了处理在某些情况下可能存在的周期缺失问题。
     # 以后如果要处理长周期数据，再改造这里，增加使用sql检测数据连续性的语句。
     try:
-        df = pd.read_sql('''
-            SELECT
-                ts AS timestamp,open_price as open,high_price as high, low_price as low, close_price as close, volume
-            FROM ''' + symbol.replace('/', '_') + '_' + time_frame + '''
-            ORDER BY ts desc limit ''' + str(limit), conn)
-        max_ts = df['timestamp'].max()
+        with sqlite3.connect(db_path) as conn:
+            df = pd.read_sql('''
+                SELECT
+                    ts AS timestamp,open_price as open,high_price as high, low_price as low, close_price as close, volume
+                FROM ''' + symbol.replace('/', '_') + '_' + time_frame + '''
+                ORDER BY ts desc limit ''' + str(limit), conn)
+            max_ts = df['timestamp'].max()
     except sqlite3.Error as e:
         logger.error(f"Database connection error: {e}")
         return False, None
@@ -219,22 +222,25 @@ def recently_macd_red_get_shorter_range(macd_height_serize):
         logger.debug(f"MACD序列长度小于4，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
         return 0
     if macd_height_serize.iloc[-2] >= 0:  # <0 才能出现红色柱子，大于0，绿色直接退出
-        logger.debug(f"MACD已完成序列的最新值的高度{macd_height_serize.iloc[-2]} >= 0，不满足先决条件。序列最新部分：{macd_height_serize.iloc[ -2:].tolist()}")
+        logger.debug(
+            f"MACD已完成序列的最新值的高度{macd_height_serize.iloc[-2]} >= 0，不满足先决条件。序列最新部分：{macd_height_serize.iloc[-2:].tolist()}")
         return 0
     else:
         if macd_height_serize.iloc[-2] < macd_height_serize.iloc[-3]:  # 值递增才能出现空心柱子，递减跳出返回0
-            logger.debug(f"MACD序列最后两根柱子高度{macd_height_serize.iloc[-2]} < {macd_height_serize.iloc[-3]} ，出现红色实心柱")
+            logger.debug(
+                f"MACD序列最后两根柱子高度{macd_height_serize.iloc[-2]} < {macd_height_serize.iloc[-3]} ，出现红色实心柱")
             return 0
         else:
             for i in range(2, len(macd_height_serize), 1):
                 if macd_height_serize.iloc[-i] > macd_height_serize.iloc[-i - 1]:
                     pass
                 else:  # 返回红色空心柱子的根数
-                    logger.debug(f"MACD红色空心柱子高度序列的最小父序列 {macd_height_serize.iloc[-i-1:-2].tolist()} 根数：{i - 2}")
+                    logger.debug(
+                        f"MACD红色空心柱子高度序列的最小父序列 {macd_height_serize.iloc[-i - 1:-2].tolist()} 根数：{i - 2}")
                     return i - 2
             logger.debug(
-                f"从第二根开始都是红色空心的{macd_height_serize.iloc[:-2].tolist()} 根数：{len(macd_height_serize)-2}")
-            return len(macd_height_serize)-2
+                f"从第二根开始都是红色空心的{macd_height_serize.iloc[:-2].tolist()} 根数：{len(macd_height_serize) - 2}")
+            return len(macd_height_serize) - 2
 
 
 # 需求：两个及以上绿色柱子（全实心或者全空心或者一实心一空心）。（新需求，不包含自身，在完全完成的K线中进行评估）
@@ -243,7 +249,8 @@ def recently_macd_green_range(macd_height_serize):
         logger.debug(f"MACD序列长度小于3，无法进行比较：{macd_height_serize.iloc[:].tolist()}")
         return 1 if macd_height_serize.iloc[-1] > 0 else 0
     if macd_height_serize.iloc[-2] < 0:  # <0 是红色柱子，不符合需求
-        logger.debug(f"MACD柱子高度序列最后第二根柱子高度{macd_height_serize.iloc[-2]} < 0，不符合需求。序列最新部分：{macd_height_serize.iloc[-3:].tolist()}。出现红柱")
+        logger.debug(
+            f"MACD柱子高度序列最后第二根柱子高度{macd_height_serize.iloc[-2]} < 0，不符合需求。序列最新部分：{macd_height_serize.iloc[-3:].tolist()}。出现红柱")
         return 0
     elif macd_height_serize.iloc[-2] > 0 > macd_height_serize.iloc[-3]:  # >0 是绿色柱子
         logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-2]}，前一根红色柱子高度{macd_height_serize.iloc[-3]}")
@@ -255,8 +262,8 @@ def recently_macd_green_range(macd_height_serize):
             else:  # 返回绿色柱子的根数
                 logger.debug(f"MACD绿色柱子高度序列的最小父序列{macd_height_serize.iloc[-i:-2].tolist()} 根数：{i - 2}")
                 return i - 2
-        logger.debug(f"所有柱子都是绿的{macd_height_serize.iloc[:-1].tolist()} 根数：{len(macd_height_serize)-1}")
-        return len(macd_height_serize)-1
+        logger.debug(f"所有柱子都是绿的{macd_height_serize.iloc[:-1].tolist()} 根数：{len(macd_height_serize) - 1}")
+        return len(macd_height_serize) - 1
 
 
 # 需求：一红一绿（无所谓空心实心）-- 实现为先红后绿。（新需求，不包含自身，在完全完成的K线中进行评估）
@@ -268,14 +275,16 @@ def recently_macd_green_and_elder_red(macd_height_serize):
         logger.debug(f"MACD绿色柱子高度{macd_height_serize.iloc[-2]}，前一根红色柱子高度{macd_height_serize.iloc[-3]}")
         return True
     else:
-        logger.debug(f"MACD高度序列最后两根柱子高度{macd_height_serize.iloc[-3]} {macd_height_serize.iloc[-2]} ，未出现先红后绿")
+        logger.debug(
+            f"MACD高度序列最后两根柱子高度{macd_height_serize.iloc[-3]} {macd_height_serize.iloc[-2]} ，未出现先红后绿")
         return False
 
 
 # 需求：macd出现了第一根红色实心柱子。且这根柱子对应的k线要阴线收盘。
 def recently_macd_red_with_candles_red(macd_height_serize, prices_open_serize, prices_close_serize):
     if len(macd_height_serize) < 2 or len(prices_open_serize) < 1 or len(prices_close_serize) < 1:
-        logger.debug(f"输入数据异常：macd序列，开盘价格序列，收盘价格序列 {macd_height_serize.iloc[:].tolist()} {prices_open_serize.iloc[:].tolist()} {prices_close_serize.iloc[:].tolist()} ")
+        logger.debug(
+            f"输入数据异常：macd序列，开盘价格序列，收盘价格序列 {macd_height_serize.iloc[:].tolist()} {prices_open_serize.iloc[:].tolist()} {prices_close_serize.iloc[:].tolist()} ")
         return False  # 数据不足，无法比较
     if (macd_height_serize.iloc[-1] < 0 and macd_height_serize.iloc[-1] < macd_height_serize.iloc[-2]) and \
             prices_open_serize.iloc[-1] > prices_close_serize.iloc[-1]:  # <0 并降序是红色实心柱子
@@ -299,8 +308,8 @@ def chk_current_ema60_greater_than_ema20(ema60, ema20):
         return False
 
 
-def transfrom_data_and_eval(conn, symbol, time_frame):
-    df, max_ts = load_from_sqlite(conn, symbol, time_frame)
+def transfrom_data_and_eval(symbol, time_frame):
+    df, max_ts = load_from_sqlite(symbol, time_frame)
     if df is False:
         return False, max_ts
     df = df.sort_values('timestamp', ascending=True)  # 确保时间序列按日期升序排列
@@ -338,23 +347,26 @@ def transfrom_data_and_eval(conn, symbol, time_frame):
         return False, max_ts
 
 
-def main_loop(conn):
+def main_loop():
     global running, alert_trigger_at, alert_thread, exchange
     if running and not stop_event.is_set():
         try:
             for i in (timeframe_15m, timeframe_30m):
                 candles = exchange.fetch_ohlcv(symbol, i, limit=1440)
                 logger.info(f"保存 {symbol} {i} K线数据:")
-                ss = save_to_sqlite(conn, candles, symbol, i)
+                ss = save_to_sqlite(candles, symbol, i)
                 if ss in (True, None):
                     logger.info(f"{symbol} {i} K线数据保存成功，开始评估数据。")
-                    eval_result, eva_time = transfrom_data_and_eval(conn, symbol, i)
-                    if (eval_result and eva_time > alert_trigger_at) or debug_alert:
-                        logger.warning(f"{symbol} {i} 条件满足，触发告警。")
-                        alert_trigger_at = eva_time
-                        alert_stop_event.clear()
-                        alert_thread = threading.Thread(target=alert_sound_loop)
-                        alert_thread.start()
+                    eval_result, eva_time = transfrom_data_and_eval(symbol, i)
+                    if (eval_result and eva_time > alert_trigger_at):
+                        if alert_thread and alert_thread.is_alive():
+                            logger.info(f"告警线程已在运行中，跳过重复触发。")
+                        else:
+                            logger.info(f"{symbol} {i} 条件满足，触发告警。")
+                            alert_trigger_at = eva_time
+                            alert_stop_event.clear()
+                            alert_thread = threading.Thread(target=alert_sound_loop, daemon=True)
+                            alert_thread.start()
                     elif eval_result and eva_time <= alert_trigger_at:
                         logger.info(f"{symbol} {i} 条件满足，但当前已经触发过，跳过告警。")
                     elif not eval_result:
@@ -374,10 +386,10 @@ def main_loop(conn):
 
         # main_loop 不再使用 time.sleep 阻塞主线程，而是通过 root.after 每 60 秒触发一次数据查询和评估。
         # 点击停止程序时，可以立即停止 main_loop 的循环调用，从而避免界面卡死。
-        root.after(60000, lambda: main_loop(conn))  # 60秒后再次调用 main_loop
+        root.after(60000, lambda: main_loop())  # 60秒后再次调用 main_loop
 
 
-def start_stop_program(conn):
+def start_stop_program():
     # 日期校验：超过 2025-06-04 不允许启动
     now = datetime.now()
     target_date = datetime(2025, 7, 9, 0, 0, 0)
@@ -421,7 +433,7 @@ def start_stop_program(conn):
             'proxies': proxies,
         })
 
-        thread = threading.Thread(target=lambda: main_loop(conn))
+        thread = threading.Thread(target=lambda: main_loop())
         thread.start()
         status_label.config(text="程序运行中...")
         start_stop_button.config(text="停止程序")  # 更改按钮文本
@@ -441,7 +453,7 @@ def pause_alert():
 def update_plot():
     try:
         # 获取最近4小时的数据 (假设 timeframe_15m 是 15 分钟)
-        df, _ = load_from_sqlite(conn, symbol, timeframe_15m, limit=4 * 16)  # 4 小时 = 16 个 15 分钟周期
+        df, _ = load_from_sqlite(symbol, timeframe_15m, limit=4 * 16)  # 4 小时 = 16 个 15 分钟周期
         if df is False:
             logger.error("无法从数据库加载数据，跳过图表更新。")
             return
@@ -500,7 +512,7 @@ proxy_entry = tk.Entry(root, width=6)
 proxy_entry.pack(padx=5, pady=5, anchor='w')
 
 # 创建按钮
-start_stop_button = ttk.Button(root, text="启动程序", command=lambda: start_stop_program(conn))
+start_stop_button = ttk.Button(root, text="启动程序", command=lambda: start_stop_program())
 pause_button = ttk.Button(root, text="暂停本次告警", command=pause_alert, state=tk.DISABLED)  # 初始状态禁用
 
 # 状态标签
@@ -529,11 +541,12 @@ class TextHandler(logging.Handler):
 
 
 # 创建 TextHandler 并添加到 logger
+console_formatter = logging.Formatter('【%(asctime)s】 - %(levelname)s - %(message)s',
+                                      datefmt='%Y-%m-%d %H:%M:%S')
 text_handler = TextHandler(log_text, max_lines=1000)
 text_handler.setLevel(logging.INFO)  # 设置为 INFO 级别
-text_handler.setFormatter(formatter)
+text_handler.setFormatter(console_formatter)
 logger.addHandler(text_handler)
-
 
 # 创建图表
 fig, ax = plt.subplots(figsize=(10, 4))
@@ -542,7 +555,7 @@ canvas_widget = canvas.get_tk_widget()
 
 
 # 定义关闭窗口时的处理函数
-def on_closing(conn):
+def on_closing():
     global running, thread, alert_thread
     running = False
     stop_event.set()  # 设置停止事件
@@ -550,9 +563,6 @@ def on_closing(conn):
     pause_alert()  # 确保停止告警声音
     if thread and thread.is_alive():
         thread.join()  # 等待主循环线程结束
-    if alert_thread and alert_thread.is_alive():
-        alert_thread.join()  # 等待告警线程结束
-    conn.close()
     root.quit()
     os._exit(0)
 
@@ -561,11 +571,9 @@ start_stop_button.pack(pady=5)
 pause_button.pack(pady=5)
 status_label.pack(pady=5)
 log_text.pack(pady=5, fill=tk.X)
-#canvas_widget.pack(pady=10)
+# canvas_widget.pack(pady=10)
 
-# 使用同一个数据库连接
-conn = sqlite3.connect(db_path, check_same_thread=False)
-root.protocol("WM_DELETE_WINDOW", lambda: on_closing(conn))
+root.protocol("WM_DELETE_WINDOW", lambda: on_closing())
 
 # 启动主循环
 root.mainloop()
