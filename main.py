@@ -198,14 +198,14 @@ def save_to_sqlite(candles, symbol, time_frame):
 
 def load_from_sqlite(symbol, time_frame, limit=400):
     # 从数据库读取增量数据-目前需求-读取400条足够-区间太小会引入指标计算误差-也避免了处理在某些情况下可能存在的周期缺失问题。
-    # 以后如果要处理长周期数据，再改造这里，增加使用sql检测数据连续性的语句。
+    # 以后如果要处理长周期数据，再改造这里，增加使用sql检测数据连续性的语句。  增加  offset 1 ，在任何时刻都跳过最近的一条数据，因为该数据还未完全定型。
     try:
         with sqlite3.connect(db_path) as conn:
             df = pd.read_sql('''
                 SELECT
                     ts AS timestamp,open_price as open,high_price as high, low_price as low, close_price as close, volume
                 FROM ''' + symbol.replace('/', '_') + '_' + time_frame + '''
-                ORDER BY ts desc limit ''' + str(limit), conn)
+                ORDER BY ts desc limit ''' + str(limit) + ' offset 1', conn)
             max_ts = df['timestamp'].max()
     except sqlite3.Error as e:
         logger.error(f"Database connection error: {e}")
