@@ -390,12 +390,12 @@ def main_loop():
 
 
 def start_stop_program():
-    # 日期校验：超过 2025-06-04 不允许启动
+    # 日期校验：超过 9999-06-04 不允许启动
     now = datetime.now()
-    target_date = datetime(2025, 7, 9, 0, 0, 0)
+    target_date = datetime(9999, 8, 16, 23, 59, 0)
     if now > target_date:
-        messagebox.showerror("启动失败", "当前试用版本截止日期2025年7月9日，试用已过期")
-        logger.info("启动失败：当前试用版本截止日期2025年7月9日，试用已过期")
+        messagebox.showerror("启动失败", "当前试用版本截止日期9999年8月16日，试用已过期")
+        logger.info("启动失败：当前试用版本截止日期9999年8月16日，试用已过期")
         return
     global running, thread, exchange
     if running:
