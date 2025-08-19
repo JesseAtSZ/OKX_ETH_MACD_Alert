@@ -143,6 +143,12 @@ def get_max_time(symbol, time_frame):
         result = cursor.fetchone()[0]
         return result if result is not None else 0
 
+def get_alert_time(symbol, time_frame):
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute('select ts from ' + symbol.replace('/', '_') + '_' + time_frame + ' order by ts desc limit 1 offset 1')
+        result = cursor.fetchone()[0]
+        return result if result is not None else 0
 
 def save_to_sqlite(candles, symbol, time_frame):
     try:
@@ -359,16 +365,16 @@ def main_loop():
                 if ss in (True, None):
                     logger.info(f"{symbol} {i} K线数据保存成功，开始评估数据。")
                     eval_result, eva_time = transfrom_data_and_eval(symbol, i)
-                    if (eval_result and eva_time > alert_trigger_at):
+                    if (eval_result and eva_time > get_alert_time(symbol, i) >  alert_trigger_at ):
                         if alert_thread and alert_thread.is_alive():
                             logger.info(f"告警线程已在运行中，跳过重复触发。")
                         else:
                             logger.info(f"{symbol} {i} 条件满足，触发告警。")
-                            alert_trigger_at = eva_time
+                            alert_trigger_at = get_alert_time(symbol, i)  # 将已完成K线的告警时间戳更新到标志变量
                             alert_stop_event.clear()
                             alert_thread = threading.Thread(target=alert_sound_loop, daemon=True)
                             alert_thread.start()
-                    elif eval_result and eva_time <= alert_trigger_at:
+                    elif (eval_result and eva_time > get_alert_time(symbol, i) >=  alert_trigger_at ):
                         logger.info(f"{symbol} {i} 条件满足，但当前已经触发过，跳过告警。")
                     elif not eval_result:
                         logger.debug(f"{symbol} {i} 条件不满足，跳过告警。")
