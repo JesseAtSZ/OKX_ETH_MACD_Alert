@@ -199,13 +199,14 @@ def save_to_sqlite(candles, symbol, time_frame):
 def load_from_sqlite(symbol, time_frame, limit=400):
     # 从数据库读取增量数据-目前需求-读取400条足够-区间太小会引入指标计算误差-也避免了处理在某些情况下可能存在的周期缺失问题。
     # 以后如果要处理长周期数据，再改造这里，增加使用sql检测数据连续性的语句。  增加  offset 1 ，在任何时刻都跳过最近的一条数据，因为该数据还未完全定型。
+    # 去掉sql中的 ' offset 1' ，增加 .iloc[:-1] 。原因是必须从 最新的K线取得 max_ts 时间， offset 1 会导致 max_ts 取不到最新的K线时间。
     try:
         with sqlite3.connect(db_path) as conn:
             df = pd.read_sql('''
                 SELECT
                     ts AS timestamp,open_price as open,high_price as high, low_price as low, close_price as close, volume
                 FROM ''' + symbol.replace('/', '_') + '_' + time_frame + '''
-                ORDER BY ts desc limit ''' + str(limit) + ' offset 1', conn)
+                ORDER BY ts desc limit ''' + str(limit), conn)
             max_ts = df['timestamp'].max()
     except sqlite3.Error as e:
         logger.error(f"Database connection error: {e}")
@@ -213,7 +214,7 @@ def load_from_sqlite(symbol, time_frame, limit=400):
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df = df.sort_values('timestamp')
     df = df.set_index('timestamp')
-    return df, max_ts
+    return df.iloc[:-1], max_ts
 
 
 # 需求： 出现macd两个及其以上红色空心柱子。（新需求，不包含自身，在完全完成的K线中进行评估）
